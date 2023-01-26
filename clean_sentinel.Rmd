@@ -1,0 +1,178 @@
+---
+title: "Clean Sentinel data"
+output: html_document
+date: "2023-01-26"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(readr)
+library(tidyr)
+library(ggplot2)
+library(lubridate)
+library(rbeni)
+source("R/init_dates_dataframe.R")
+```
+
+## Read file
+
+```{r cars}
+df <- read_csv("data/pixel_data.csv") |> 
+  
+  # clean date
+  mutate(timestamp = lubridate::dmy(timestamp)) |> 
+  
+  # arrange by date
+  arrange(timestamp) |> 
+  
+  rename(date = timestamp) |> 
+  
+  # get decimal year
+  mutate(year_dec = lubridate::decimal_date(date))
+```
+
+Fraction of cloud contaminated
+```{r}
+df |> 
+  ggplot(aes(cp, ..density..)) +
+  geom_histogram()
+```
+
+## Clean data
+
+Retaining only 
+```{r}
+df_clean <- df |> 
+  # clean based on cloud probability into classes
+  mutate(qc = ifelse(cp < 0.01, "good", "bad")) |> 
+  mutate(ndvi_clean = ifelse(qc == "good", ndvi, NA)) |> 
+  drop_na(ndvi_clean)
+```
+
+Drop outliers per week-of-year
+```{r}
+remove_outliers <- function(df, varnam){
+  outliers <- boxplot.stats(df[[varnam]])$out
+  df[[varnam]] <- ifelse(df[[varnam]] %in% outliers, NA, df[[varnam]])
+  return(df)
+}
+
+df_clean2 <- df_clean |> 
+  mutate(week = lubridate::week(date)) |> 
+  group_by(week) |> 
+  nest() |> 
+  mutate(data = purrr::map(data, ~remove_outliers(., "ndvi_clean"))) |> 
+  unnest(data) |> 
+  ungroup() |> 
+  drop_na()
+```
+
+Span all dates.
+```{r}
+ddf <- init_dates_dataframe(yrstart = min(year(df$date)), yrend =  max(year(df$date))) |> 
+  left_join(df |> 
+              select(-year_dec), 
+            by = "date")
+```
+
+## Filter time series
+
+### Savitzky-Golay filter
+
+```{r}
+df_clean2 <- df_clean2 |> 
+  mutate(ndvi_sg = signal::sgolayfilt(ndvi_clean, p = 7, n = 15, m = 0))
+
+# linearly interpolate to daily output based on filtered
+ddf$ndvi_sg <- stats::approx(df_clean2$year_dec, 
+                                df_clean2$ndvi_sg, 
+                                xout = ddf$year_dec)$y
+```
+
+### Spline
+
+```{r}
+mod_spline <- with(df_clean2, stats::smooth.spline(year_dec, ndvi_clean, spar = 0.01))
+ddf$ndvi_spline = predict(mod_spline, ddf$year_dec)$y
+```
+
+### LOESS
+
+```{r}
+# determine periodicity of data (here 1 for one day)
+period <- ddf |>
+  mutate(prevdate = lag(date)) |>
+  mutate(period = as.integer(difftime(date, prevdate))) |>
+  pull(period) |>
+  min(na.rm = TRUE)
+
+# take a three-weeks window for locally weighted regression (loess)
+# good explanation: 
+# https://rafalab.github.io/dsbook/smoothing.html#local-weighted-regression-loess
+ndays_tot <- lubridate::time_length(diff(range(ddf$date)), unit = "day")
+# (20*period)/ndays_tot  
+# multiply with larger number to get smoother curve
+span <- 100/ndays_tot
+
+mod_loess <- stats::loess( ndvi_clean ~ year_dec, data = df_clean2, span = span)
+
+ddf$ndvi_loess <- stats::predict( mod_loess, newdata = ddf )
+```
+
+### Linear interpolation
+
+```{r}
+ddf$ndvi_intpl <- stats::approx(df_clean2$year_dec, 
+                                df_clean2$ndvi_clean, 
+                                xout = ddf$year_dec)$y
+```
+
+## Plot full time series
+
+```{r}
+ggplot() +
+  geom_point(aes(date, ndvi), color = "grey", data = df) +
+  geom_point(aes(date, ndvi_clean), color = "green", data = df_clean) +
+  geom_point(aes(date, ndvi_clean), color = "black", data = df_clean2) +
+  geom_line(aes(date, ndvi_sg), color = "royalblue", data = ddf) +
+  geom_line(aes(date, ndvi_loess), color = "orchid", data = ddf) +
+  geom_line(aes(date, ndvi_intpl), color = "tomato", data = ddf) +
+  ylim(-0.2, 1)
+```
+
+
+## Years
+
+### Linearly interpoloated
+```{r}
+ddf |> 
+  mutate(doy = lubridate::yday(date),
+         year = as.factor(lubridate::year(date))) |> 
+  ggplot(aes(x = doy, y = ndvi_intpl, group = year, color = year)) +
+  geom_line() +
+  ylim(-0.5, 1)
+```
+
+### LOESS
+```{r}
+ddf |> 
+  mutate(doy = lubridate::yday(date),
+         year = as.factor(lubridate::year(date))) |> 
+  ggplot(aes(x = doy, y = ndvi_loess, group = year, color = year)) +
+  geom_line() +
+  ylim(-0.5, 1)
+```
+### Savitzky-Golay
+
+Not very convincing!
+```{r}
+ddf |> 
+  mutate(doy = lubridate::yday(date),
+         year = as.factor(lubridate::year(date))) |> 
+  ggplot(aes(x = doy, y = ndvi_sg, group = year, color = year)) +
+  geom_line() +
+  ylim(-0.5, 1)
+```
+
+
