@@ -4,7 +4,7 @@ output: html_document
 date: "2023-01-26"
 ---
 
-```{r setup, include=FALSE}
+```{r}
 knitr::opts_chunk$set(echo = TRUE)
 library(dplyr)
 library(readr)
@@ -41,7 +41,8 @@ df |>
 
 ## Clean data
 
-Retaining only 
+Retaining only data with CP < 0.01.
+
 ```{r}
 df_clean <- df |> 
   # clean based on cloud probability into classes
@@ -50,7 +51,8 @@ df_clean <- df |>
   drop_na(ndvi_clean)
 ```
 
-Drop outliers per week-of-year
+Drop outliers per week-of-year. Outliers are determined here by R's `boxplot.stat()` function.
+
 ```{r}
 remove_outliers <- function(df, varnam){
   outliers <- boxplot.stats(df[[varnam]])$out
@@ -68,7 +70,7 @@ df_clean2 <- df_clean |>
   drop_na()
 ```
 
-Span all dates.
+Create a data frame spanning all dates (daily, not just dates where Sentinel observations are available). The function `init_dates_dataframe()` is in subdirectory `./R/`.
 ```{r}
 ddf <- init_dates_dataframe(yrstart = min(year(df$date)), yrend =  max(year(df$date))) |> 
   left_join(df |> 
@@ -76,7 +78,7 @@ ddf <- init_dates_dataframe(yrstart = min(year(df$date)), yrend =  max(year(df$d
             by = "date")
 ```
 
-## Filter time series
+## Smooth and interpolate time series
 
 ### Savitzky-Golay filter
 
@@ -111,9 +113,7 @@ period <- ddf |>
 # good explanation: 
 # https://rafalab.github.io/dsbook/smoothing.html#local-weighted-regression-loess
 ndays_tot <- lubridate::time_length(diff(range(ddf$date)), unit = "day")
-# (20*period)/ndays_tot  
-# multiply with larger number to get smoother curve
-span <- 100/ndays_tot
+span <- 100*period/ndays_tot
 
 mod_loess <- stats::loess( ndvi_clean ~ year_dec, data = df_clean2, span = span)
 
@@ -141,10 +141,20 @@ ggplot() +
   ylim(-0.2, 1)
 ```
 
+- Grey dots: removed based on cloud probability
+- Green dots: removed based on outliers within week-of-year.
+- Black dots: remaining good-quality data
+- Blue line: Savitzky-Golay
+- Red line: linear interpolation
+- purple line: LOESS smoothing
+
 
 ## Years
 
+Compare smoothed NDVI across years using, separate for each smoothing approach.
+
 ### Linearly interpoloated
+
 ```{r}
 ddf |> 
   mutate(doy = lubridate::yday(date),
@@ -155,6 +165,7 @@ ddf |>
 ```
 
 ### LOESS
+
 ```{r}
 ddf |> 
   mutate(doy = lubridate::yday(date),
@@ -163,6 +174,7 @@ ddf |>
   geom_line() +
   ylim(-0.5, 1)
 ```
+
 ### Savitzky-Golay
 
 Not very convincing!
